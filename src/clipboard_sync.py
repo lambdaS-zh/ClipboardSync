@@ -1,7 +1,7 @@
 import socket
 import struct
 import sys
-from monotonic import monotonic
+from time import monotonic
 from select import select as select_
 
 import pyperclip
@@ -24,11 +24,13 @@ class StreamHandler(object):
 
     def __init__(self):
         self._buf = b''
+        self._clipboard_cache = ''
 
     def _on_idle(self, conn):
         pass
 
-    def _pack_text(self, text):
+    @staticmethod
+    def _pack_text(text):
         payload = text.encode(BIN_CODING)
         payload_len = len(payload)
         return STREAM_MAGIC + struct.pack('!I', payload_len) + payload
@@ -44,7 +46,7 @@ class StreamHandler(object):
         if len(self._buf) < magic_len + HEADER_LEN:
             return
         header = self._buf[magic_len:magic_len + HEADER_LEN]
-        payload_len = struct.unpack('!I', header)
+        payload_len = struct.unpack('!I', header)[0]
 
         msg_len = magic_len + HEADER_LEN + payload_len
         if len(self._buf) < msg_len:
@@ -54,6 +56,8 @@ class StreamHandler(object):
         self._buf = self._buf[msg_len:]
         if text:
             # that means text is not heartbeat data
+            print('got copy from remote, text: %s' % text)
+            self._clipboard_cache = text
             pyperclip.copy(text)
 
     def _loop(self, conn):
@@ -70,11 +74,11 @@ class StreamHandler(object):
                     self._on_recv_data(data)
                     continue
 
-                try:
-                    text = pyperclip.waitForNewPaste(CLIP_TIMEOUT)
-                except pyperclip.PyperclipTimeoutException:
-                    pass
-                else:
+                # There are some troubles using pyperclip.waitForNewPaste.
+                text = pyperclip.paste()
+                if text and text != self._clipboard_cache:
+                    print('got copy from local, text: %s' % text)
+                    self._clipboard_cache = text
                     msg = self._pack_text(text)
                     conn.sendall(msg)
                     continue
@@ -101,11 +105,13 @@ class NetSyncClient(StreamHandler):
         self._hb_stamp = now
         hb = self._pack_text('')
         conn.sendall(hb)
+        print('heartbeat sent.')
 
     def run(self):
         while True:
             conn = socket.socket()
             conn.connect(self._addr)
+            print('built a connection with %s' % str(self._addr))
             self._loop(conn)
 
 
@@ -125,13 +131,16 @@ class NetSyncServer(StreamHandler):
             finally:
                 server.close()
 
+            print('received a connection from %s' % str(remote))
             self._loop(conn)
 
 
 def parse_addr(raw):
     if ':' not in raw:
         raise ValueError('Invalid addr: %s' % raw)
-    return tuple(raw.split(':'))
+    result = raw.split(':')
+    result[1] = int(result[1])
+    return tuple(result)
 
 
 if __name__ == '__main__':
